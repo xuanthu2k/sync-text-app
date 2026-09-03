@@ -1,4 +1,4 @@
-import { ApiClientError, type DocumentData, type SaveResult, type Session } from "./types";
+import { ApiClientError, type DocumentData, type ImageUploadResult, type SaveResult, type Session } from "./types";
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { credentials: "same-origin", ...init });
@@ -17,4 +17,5 @@ export const api = {
   logout: () => call<void>("/api/auth/logout", { method: "POST" }),
   document: () => call<DocumentData>("/api/document"),
   save: (content: unknown[], baseRevision: number) => call<SaveResult>("/api/document", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content, baseRevision }) }),
+  uploadImage: (file: File) => call<ImageUploadResult>("/api/images", { method: "POST", headers: { "Content-Type": file.type }, body: file }),
 };

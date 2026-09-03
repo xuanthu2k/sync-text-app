@@ -14,6 +14,7 @@ export function EditorPage({ initial, onLogout, onUnauthorized }: { initial: Doc
   const [editorKey, setEditorKey] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [conflict, setConflict] = useState<Conflict>();
+  const [uploadError, setUploadError] = useState<string>();
   const latest = useRef<unknown[]>(initial.content);
   const revision = useRef(initial.revision);
   const timer = useRef<number | undefined>(undefined); const saving = useRef(false); const pending = useRef(false);
@@ -44,13 +45,27 @@ export function EditorPage({ initial, onLogout, onUnauthorized }: { initial: Doc
     if (timer.current) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => void saveNowRef.current(), 1750);
   }, []);
-  const editor = useCreateBlockNote({ initialContent: (document.content.length ? document.content : emptyContent) as PartialBlock[] });
+  const uploadFile = useCallback(async (file: File) => {
+    setUploadError(undefined);
+    try {
+      return (await api.uploadImage(file)).url;
+    } catch (cause) {
+      if (cause instanceof ApiClientError && cause.status === 401) onUnauthorized();
+      if (cause instanceof ApiClientError && cause.code === "IMAGE_TOO_LARGE") setUploadError("Ảnh vượt quá giới hạn 5 MiB.");
+      else if (cause instanceof ApiClientError && cause.code === "IMAGE_STORAGE_LIMIT_REACHED") setUploadError("Đã đạt hạn mức lưu trữ ảnh 500 MiB. Hãy liên hệ quản trị viên để tăng hạn mức.");
+      else if (cause instanceof ApiClientError && (cause.code === "UNSUPPORTED_MEDIA_TYPE" || cause.code === "INVALID_IMAGE")) setUploadError("Chỉ hỗ trợ ảnh PNG, JPEG, WebP hoặc GIF.");
+      else setUploadError("Không thể tải ảnh lên. Vui lòng thử lại.");
+      throw cause;
+    }
+  }, [onUnauthorized]);
+  const editor = useCreateBlockNote({ initialContent: (document.content.length ? document.content : emptyContent) as PartialBlock[], uploadFile });
   useEffect(() => { const handler = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void saveNowRef.current(); } }; window.addEventListener("keydown", handler); return () => { window.removeEventListener("keydown", handler); if (timer.current) window.clearTimeout(timer.current); }; }, []);
 
   async function reloadServer() { const server = await api.document(); latest.current = server.content; revision.current = server.revision; setDocument(server); setConflict(undefined); setEditorKey((key) => key + 1); setSaveState("saved"); }
   function overwrite() { if (!conflict) return; revision.current = conflict.revision; setConflict(undefined); void saveNow(); }
   return <main className="editor-shell"><header><div><h1>Sync Text</h1><SaveStatus state={saveState} updatedAt={document.updatedAt} /></div><div className="header-actions"><button onClick={() => void saveNow()} disabled={saveState === "saving"}>Lưu ngay</button><button className="secondary" onClick={() => void onLogout()}>Đăng xuất</button></div></header>
     {saveState === "error" && <ErrorMessage>Không thể lưu. Kiểm tra kết nối rồi bấm “Lưu ngay” để thử lại.</ErrorMessage>}
+    {uploadError && <ErrorMessage>{uploadError}</ErrorMessage>}
     <section className="editor-card" key={editorKey}><BlockNoteView editor={editor} onChange={() => onChange(editor.document)} theme="light" /></section>
     {conflict && <div className="dialog-backdrop" role="presentation"><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="conflict-title"><h2 id="conflict-title">Có thay đổi từ thiết bị khác</h2><p>Bản nháp hiện tại vẫn được giữ. Hãy chọn cách xử lý.</p><div className="header-actions"><button className="secondary" onClick={() => void reloadServer()}>Tải phiên bản trên server</button><button onClick={overwrite}>Ghi đè bằng nội dung hiện tại</button></div></section></div>}
   </main>;

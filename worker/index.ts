@@ -1,6 +1,7 @@
 import { createSession, credentialsMatch, expiredSessionCookie, getCookie, sessionCookie, verifySession } from "./auth";
 import { error, hasJsonContentType, isSameOriginMutation, json, noContent, readJson, requestId } from "./http";
 import { validateDocument, validateLogin } from "./validation";
+import { getImage, uploadImage } from "./images";
 
 type DocumentRow = { content_json: string; revision: number; updated_at: string };
 const invalidCredentials = "Tên đăng nhập hoặc mật khẩu không đúng.";
@@ -16,6 +17,9 @@ export default {
       if (url.pathname === "/api/auth/logout" && request.method === "POST") return noContent({ "Set-Cookie": expiredSessionCookie(url.protocol === "https:") });
       if (url.pathname === "/api/auth/session" && request.method === "GET") return session(request, env, id);
       if (url.pathname === "/api/document") return document(request, env, id);
+      if (url.pathname === "/api/images" && request.method === "POST") return imageUpload(request, env, id);
+      const imageId = url.pathname.match(/^\/api\/images\/([^/]+)$/)?.[1];
+      if (imageId && request.method === "GET") return imageDownload(request, env, imageId, id);
       return error("BAD_REQUEST", "Endpoint không tồn tại.", 404, id);
     } catch (cause) {
       console.error(JSON.stringify({ level: "error", requestId: id, message: "Unhandled API error", cause: cause instanceof Error ? cause.message : "unknown" }));
@@ -32,6 +36,20 @@ async function login(request: Request, env: Env, id: string): Promise<Response> 
   const passwordMatches = await credentialsMatch(input.password, env.AUTH_PASSWORD, env.SESSION_SECRET);
   if (!usernameMatches || !passwordMatches) return error("INVALID_CREDENTIALS", invalidCredentials, 401, id);
   return noContent({ "Set-Cookie": sessionCookie(await createSession(env.AUTH_USERNAME, env.SESSION_SECRET), new URL(request.url).protocol === "https:") });
+}
+
+async function imageUpload(request: Request, env: Env, id: string): Promise<Response> {
+  if (!(await isAuthenticated(request, env))) return error("UNAUTHORIZED", "Phiên đăng nhập không hợp lệ.", 401, id);
+  return uploadImage(request, env, id);
+}
+
+async function imageDownload(request: Request, env: Env, imageId: string, id: string): Promise<Response> {
+  if (!(await isAuthenticated(request, env))) return error("UNAUTHORIZED", "Phiên đăng nhập không hợp lệ.", 401, id);
+  return getImage(imageId, env, id);
+}
+
+function isAuthenticated(request: Request, env: Env): Promise<boolean> {
+  return verifySession(getCookie(request), env.SESSION_SECRET).then((value) => Boolean(value && value.sub === env.AUTH_USERNAME));
 }
 
 async function session(request: Request, env: Env, id: string): Promise<Response> {

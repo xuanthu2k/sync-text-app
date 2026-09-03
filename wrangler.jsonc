@@ -19,5 +19,11 @@
       "migrations_dir": "migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGES",
+      "bucket_name": "sync-text-images"
+    }
+  ],
   "observability": { "enabled": true }
 }
