@@ -25,5 +25,8 @@
       "bucket_name": "sync-text-images"
     }
   ],
+  "triggers": {
+    "crons": ["0 3 * * *"]
+  },
   "observability": { "enabled": true }
 }

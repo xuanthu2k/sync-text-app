@@ -30,3 +30,5 @@ The placeholder D1 ID is intentionally invalid for deployment. It must be replac
 ## Images
 
 Paste a screenshot or image file directly into the editor, or choose **Add image** from its slash menu. Images are stored in the private `sync-text-images` R2 bucket and served only through an authenticated `/api/images/:id` endpoint. PNG, JPEG, WebP, and GIF are accepted up to 5 MiB each; SVG and remote-image URL importing are intentionally not supported. The Worker enforces a 500 MiB total image-storage limit before writing to R2, so uploads cannot exceed the app's configured storage budget.
+
+When an image is removed from the saved document, it becomes eligible for deletion after seven days. A daily Cron Trigger at 03:00 UTC checks that the image is still unreferenced, deletes it from R2, and the D1 delete trigger releases its quota. Newly uploaded images are also cleaned up after seven days if they never reach a successful document save.

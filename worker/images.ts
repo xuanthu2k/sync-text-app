@@ -2,6 +2,9 @@ import { error, json } from "./http";
 
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_IMAGE_STORAGE_BYTES = 500 * 1024 * 1024;
+export const IMAGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const CLEANUP_BATCH_SIZE = 100;
+const CLEANUP_CLAIM_TIMEOUT_MS = 60 * 60 * 1000;
 
 type ImageType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
 
@@ -24,17 +27,73 @@ export async function uploadImage(request: Request, env: Env, id: string): Promi
   if (!reserved) return error("IMAGE_STORAGE_LIMIT_REACHED", "Đã đạt hạn mức lưu trữ ảnh 500 MiB.", 413, id);
 
   const imageId = crypto.randomUUID();
+  const key = imageKey(imageId);
+  const timestamp = new Date().toISOString();
   try {
-    await env.IMAGES.put(imageKey(imageId), bytes, {
+    await env.IMAGES.put(key, bytes, {
       httpMetadata: { contentType: detectedType },
-      customMetadata: { uploadedAt: new Date().toISOString() },
+      customMetadata: { uploadedAt: timestamp },
     });
+    await env.DB.prepare("INSERT INTO images (id, r2_key, size_bytes, content_type, created_at, unreferenced_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(imageId, key, bytes.byteLength, detectedType, timestamp, timestamp).run();
   } catch (cause) {
-    await releaseImageStorage(env, bytes.byteLength, id);
+    await removeFailedUpload(env, key, bytes.byteLength, id);
     console.error(JSON.stringify({ level: "error", requestId: id, message: "Image upload failed", cause: cause instanceof Error ? cause.message : "unknown" }));
     return error("IMAGE_UPLOAD_FAILED", "Không thể tải ảnh lên. Vui lòng thử lại.", 502, id);
   }
   return json({ url: `/api/images/${imageId}` }, 201);
+}
+
+export async function syncImageReferences(content: unknown[], env: Env, id: string): Promise<void> {
+  const referencedIds = collectImageIds(content);
+  const { results } = await env.DB.prepare("SELECT id, unreferenced_at, cleanup_claimed_at FROM images").all<ImageReferenceRow>();
+  const now = new Date().toISOString();
+  const changes: D1PreparedStatement[] = [];
+  for (const image of results) {
+    if (referencedIds.has(image.id)) {
+      if (image.unreferenced_at || image.cleanup_claimed_at) changes.push(env.DB.prepare("UPDATE images SET unreferenced_at = NULL, cleanup_claimed_at = NULL WHERE id = ?").bind(image.id));
+    } else if (!image.unreferenced_at) {
+      changes.push(env.DB.prepare("UPDATE images SET unreferenced_at = ?, cleanup_claimed_at = NULL WHERE id = ?").bind(now, image.id));
+    }
+  }
+  if (changes.length) await env.DB.batch(changes);
+}
+
+export async function cleanupUnreferencedImages(env: Env, now = Date.now()): Promise<number> {
+  const cutoff = new Date(now - IMAGE_RETENTION_MS).toISOString();
+  const staleClaimCutoff = new Date(now - CLEANUP_CLAIM_TIMEOUT_MS).toISOString();
+  const { results } = await env.DB.prepare("SELECT id, r2_key, unreferenced_at FROM images WHERE unreferenced_at <= ? AND (cleanup_claimed_at IS NULL OR cleanup_claimed_at <= ?) ORDER BY unreferenced_at LIMIT ?")
+    .bind(cutoff, staleClaimCutoff, CLEANUP_BATCH_SIZE).all<CleanupCandidate>();
+  if (!results.length) return 0;
+
+  const claimTime = new Date(now).toISOString();
+  let deleted = 0;
+  for (const image of results) {
+    const claim = await env.DB.prepare("UPDATE images SET cleanup_claimed_at = ? WHERE id = ? AND unreferenced_at = ? AND (cleanup_claimed_at IS NULL OR cleanup_claimed_at <= ?)")
+      .bind(claimTime, image.id, image.unreferenced_at, staleClaimCutoff).run();
+    if (claim.meta.changes !== 1) continue;
+    if ((await currentDocumentImageIds(env)).has(image.id)) {
+      await env.DB.prepare("UPDATE images SET unreferenced_at = NULL, cleanup_claimed_at = NULL WHERE id = ? AND cleanup_claimed_at = ?").bind(image.id, claimTime).run();
+      continue;
+    }
+    const stillClaimed = await env.DB.prepare("SELECT id FROM images WHERE id = ? AND cleanup_claimed_at = ? AND unreferenced_at IS NOT NULL").bind(image.id, claimTime).first<{ id: string }>();
+    if (!stillClaimed) continue;
+    try {
+      await env.IMAGES.delete(image.r2_key);
+      const removed = await env.DB.prepare("DELETE FROM images WHERE id = ? AND cleanup_claimed_at = ? AND unreferenced_at IS NOT NULL").bind(image.id, claimTime).run();
+      if (removed.meta.changes === 1) deleted += 1;
+    } catch (cause) {
+      await env.DB.prepare("UPDATE images SET cleanup_claimed_at = NULL WHERE id = ? AND cleanup_claimed_at = ?").bind(image.id, claimTime).run();
+      console.error(JSON.stringify({ level: "error", message: "Image cleanup failed", imageId: image.id, cause: cause instanceof Error ? cause.message : "unknown" }));
+    }
+  }
+  return deleted;
+}
+
+export function collectImageIds(content: unknown): Set<string> {
+  const imageIds = new Set<string>();
+  collectImageIdsFromValue(content, imageIds);
+  return imageIds;
 }
 
 async function reserveImageStorage(env: Env, size: number): Promise<boolean> {
@@ -50,6 +109,38 @@ async function releaseImageStorage(env: Env, size: number, id: string): Promise<
     console.error(JSON.stringify({ level: "error", requestId: id, message: "Image quota release failed", cause: cause instanceof Error ? cause.message : "unknown" }));
   }
 }
+
+async function removeFailedUpload(env: Env, key: string, size: number, id: string): Promise<void> {
+  try {
+    await env.IMAGES.delete(key);
+    await releaseImageStorage(env, size, id);
+  } catch (cause) {
+    console.error(JSON.stringify({ level: "error", requestId: id, message: "Failed image cleanup after upload error", cause: cause instanceof Error ? cause.message : "unknown" }));
+  }
+}
+
+async function currentDocumentImageIds(env: Env): Promise<Set<string>> {
+  const row = await env.DB.prepare("SELECT content_json FROM documents WHERE id = 'main'").first<{ content_json: string }>();
+  if (!row) throw new Error("Main document missing during image cleanup");
+  try { return collectImageIds(JSON.parse(row.content_json)); } catch { throw new Error("Document content cannot be parsed during image cleanup"); }
+}
+
+function collectImageIdsFromValue(value: unknown, imageIds: Set<string>): void {
+  if (Array.isArray(value)) { for (const item of value) collectImageIdsFromValue(item, imageIds); return; }
+  if (!isRecord(value)) return;
+  if (value.type === "image" && isRecord(value.props) && typeof value.props.url === "string") {
+    const imageId = value.props.url.match(/^\/api\/images\/([0-9a-f-]+)$/i)?.[1];
+    if (imageId && imageIdPattern.test(imageId)) imageIds.add(imageId);
+  }
+  for (const nested of Object.values(value)) collectImageIdsFromValue(nested, imageIds);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type ImageReferenceRow = { id: string; unreferenced_at: string | null; cleanup_claimed_at: string | null };
+type CleanupCandidate = { id: string; r2_key: string; unreferenced_at: string };
 
 export async function getImage(imageId: string, env: Env, id: string): Promise<Response> {
   if (!imageIdPattern.test(imageId)) return error("IMAGE_NOT_FOUND", "Không tìm thấy ảnh.", 404, id);

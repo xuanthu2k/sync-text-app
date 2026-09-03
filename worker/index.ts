@@ -1,7 +1,7 @@
 import { createSession, credentialsMatch, expiredSessionCookie, getCookie, sessionCookie, verifySession } from "./auth";
 import { error, hasJsonContentType, isSameOriginMutation, json, noContent, readJson, requestId } from "./http";
 import { validateDocument, validateLogin } from "./validation";
-import { getImage, uploadImage } from "./images";
+import { cleanupUnreferencedImages, getImage, syncImageReferences, uploadImage } from "./images";
 
 type DocumentRow = { content_json: string; revision: number; updated_at: string };
 const invalidCredentials = "Tên đăng nhập hoặc mật khẩu không đúng.";
@@ -25,6 +25,9 @@ export default {
       console.error(JSON.stringify({ level: "error", requestId: id, message: "Unhandled API error", cause: cause instanceof Error ? cause.message : "unknown" }));
       return error("INTERNAL_ERROR", "Máy chủ gặp lỗi. Vui lòng thử lại.", 500, id);
     }
+  },
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(cleanupUnreferencedImages(env).then((deleted) => console.log(JSON.stringify({ level: "info", message: "Image cleanup completed", deleted }))));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -80,5 +83,7 @@ async function document(request: Request, env: Env, id: string): Promise<Respons
   }
   const updated = await env.DB.prepare("SELECT revision, updated_at FROM documents WHERE id = 'main'").first<Pick<DocumentRow, "revision" | "updated_at">>();
   if (!updated) throw new Error("Main document disappeared");
+  try { await syncImageReferences(input.content, env, id); }
+  catch (cause) { console.error(JSON.stringify({ level: "error", requestId: id, message: "Image reference sync failed", cause: cause instanceof Error ? cause.message : "unknown" })); }
   return json({ revision: updated.revision, updatedAt: updated.updated_at });
 }
