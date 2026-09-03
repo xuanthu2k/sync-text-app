@@ -1,0 +1,12 @@
+node_modules/
+.pnpm-store/
+dist/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+coverage/
+.wrangler-config/
+.tmp-workerd/
+*.tgz
