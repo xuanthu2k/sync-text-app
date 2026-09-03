@@ -14,7 +14,7 @@
     {
       "binding": "DB",
       "database_name": "sync-text-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "6939ea29-b46f-4a87-82f9-45079597b814",
       "migrations_dir": "migrations"
     }
   ],
